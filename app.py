@@ -3,7 +3,7 @@ import re
 import time
 import urllib.parse
 import requests
-from flask import Flask, Response, request, redirect
+from flask import Flask, Response, request, redirect, jsonify
 from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
@@ -24,18 +24,24 @@ headers = {
 
 PLAYLIST_CACHE = None
 CACHE_TIMESTAMP = 0
-CACHE_DURATION = 1800  # ৩০ মিনিট ক্যাশ থাকবে
+CACHE_DURATION = 1800
 
-def clean_redirect_url(url):
-    """সাধারণ ক্লিনিং (ব্যাকআপের জন্য)"""
+# সেশন এবং কুকি বারবার হ্যান্ডশেক এড়াতে গ্লোবাল ভ্যারিয়েবল
+ACTIVE_TOKEN = None
+ACTIVE_COOKIE = None
+
+def clean_redirect_url(url, force_m3u8=False):
     if not url:
         return ""
     cleaned = re.sub(r'^(auto|ffrt|ffmpeg|rtmp|mp4)\s+', '', url, flags=re.IGNORECASE).strip()
     cleaned = cleaned.replace('\\', '/')
     cleaned = re.sub(r'^(https?:)/+', r'\1//', cleaned)
+    if force_m3u8:
+        cleaned = re.sub(r'\.ts(?=\b|\?|$)', '.m3u8', cleaned, flags=re.IGNORECASE)
     return cleaned
 
 def get_session():
+    global ACTIVE_TOKEN, ACTIVE_COOKIE
     handshake_url = f"{PORTAL_URL}?type=stb&action=handshake&js=&token=&mac={MAC_ADDRESS}"
     try:
         response = requests.get(handshake_url, headers=headers, timeout=10)
@@ -43,7 +49,6 @@ def get_session():
             data = response.json()
             token = data.get('js', {}).get('token', '')
             
-            # সেট-কুকি থেকে শুধুমাত্র সেশন আইডি (PHPSESSID=xxxx) অংশটি ফিল্টার করা
             set_cookie = response.headers.get('Set-Cookie', '')
             cookie_val = ""
             if set_cookie:
@@ -51,15 +56,15 @@ def get_session():
                 if match:
                     cookie_val = match.group(1)
             
+            ACTIVE_TOKEN = token
+            ACTIVE_COOKIE = cookie_val
             return token, cookie_val
     except Exception:
         pass
     return None, None
 
 def get_playable_link(token, cookie, cmd_url):
-    # safe='' দিয়ে সব স্ল্যাশ ও ক্যারেক্টারকে প্রপারলি এনকোড করা হচ্ছে
     encoded_cmd = urllib.parse.quote(cmd_url, safe='')
-    # টোকেন ইউআরএল প্যারামিটার হিসেবেও পাঠানো হচ্ছে
     url = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd}&token={token}&series=&forced_tmp_link=1"
     
     session_headers = headers.copy()
@@ -147,7 +152,6 @@ def fetch_genre_m3u(genre, token, cookie, host_url):
     return m3u_part
 
 def extract_channel_id(cmd):
-    """কমান্ড ইউআরএল থেকে চ্যানেল আইডি এক্সট্র্যাক্ট করা"""
     match = re.search(r'channelId=(\d+)', cmd)
     if match:
         return match.group(1)
@@ -210,6 +214,7 @@ def playlist():
 
 @app.route('/play')
 def play():
+    global ACTIVE_TOKEN, ACTIVE_COOKIE
     cmd = request.args.get('cmd')
     if not cmd:
         return "Missing cmd parameter.", 400
@@ -218,24 +223,55 @@ def play():
     if not channel_id:
         return "Invalid channel ID.", 400
 
-    token, cookie = get_session()
+    token, cookie = ACTIVE_TOKEN, ACTIVE_COOKIE
+    if not token:
+        token, cookie = get_session()
+
     if not token:
         return "Failed to authenticate session.", 500
 
     playable_url = get_playable_link(token, cookie, cmd)
 
-    # যদি সেশন লিঙ্ক পাওয়া যায়, তবে সেখান থেকে SN_xxxx টোকেন নিয়ে সরাসরি ফর্মুলা ভিত্তিক .m3u8 লিঙ্ক তৈরি করা হবে
     if playable_url:
         match = re.search(r'(SN_\d+)', playable_url)
         if match:
             sn_token = match.group(1)
-            # আপনার সেই শতভাগ সফল .m3u8 ফর্মুলা লিঙ্ক জেনারেশন
             final_m3u8_url = f"http://tv.cloudcdn.me/live/{MAC_ADDRESS}/{sn_token}/{channel_id}.m3u8"
             return redirect(final_m3u8_url, code=302)
 
-    # ব্যর্থ হলে ব্যাকআপ হিসেবে মূল লিঙ্কটি (.ts হিসেবেই) ওপেন হবে
     fallback_url = clean_redirect_url(cmd)
     return redirect(fallback_url, code=302)
+
+# --- নতুন লাইভ ডায়াগনস্টিক অ্যান্ডপয়েন্ট ---
+@app.route('/debug')
+def debug():
+    cmd = request.args.get('cmd')
+    if not cmd:
+        return "Please add cmd in URL. Example: /debug?cmd=auto...", 400
+        
+    token, cookie = get_session()
+    if not token:
+        return jsonify({"error": "Handshake failed", "token": token, "cookie": cookie}), 500
+        
+    encoded_cmd = urllib.parse.quote(cmd, safe='')
+    url = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd}&token={token}&series=&forced_tmp_link=1"
+    
+    session_headers = headers.copy()
+    session_headers['Authorization'] = f'Bearer {token}'
+    if cookie:
+        session_headers['Cookie'] = f"mac={MAC_ADDRESS}; {cookie}"
+        
+    try:
+        response = requests.get(url, headers=session_headers, timeout=10)
+        return jsonify({
+            "portal_status_code": response.status_code,
+            "portal_response_raw": response.text,
+            "extracted_token": token,
+            "extracted_cookie": cookie,
+            "api_request_url": url
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
