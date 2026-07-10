@@ -22,10 +22,23 @@ headers = {
     'X-User-MAC': MAC_ADDRESS
 }
 
-# --- মেমোরি ক্যাশ সেটিংস ---
 PLAYLIST_CACHE = None
 CACHE_TIMESTAMP = 0
-CACHE_DURATION = 1800  # ৩০ মিনিট (১৮০০ সেকেন্ড) মেমোরিতে সেভ থাকবে
+CACHE_DURATION = 1800  # ৩০ মিনিট ক্যাশ থাকবে
+
+def clean_redirect_url(url):
+    """লিঙ্ক থেকে ffrt/auto প্রিফিক্স মুছে ফেলা এবং .ts কে .m3u8 এ রূপান্তর করা"""
+    if not url:
+        return ""
+    # ১. ffrt, auto, ffmpeg প্রিফিক্স মুছে ফেলা
+    cleaned = re.sub(r'^(auto|ffrt|ffmpeg|rtmp|mp4)\s+', '', url, flags=re.IGNORECASE).strip()
+    # ২. ব্যাকস্ল্যাশ ঠিক করা
+    cleaned = cleaned.replace('\\', '/')
+    # ৩. ডবল স্ল্যাশ নিশ্চিত করা
+    cleaned = re.sub(r'^(https?:)/+', r'\1//', cleaned)
+    # ৪. জোরপূর্বক .ts এক্সটেনশনকে .m3u8 এ রূপান্তর করা
+    cleaned = re.sub(r'\.ts(\b|\?|$)', '.m3u8', cleaned, flags=re.IGNORECASE)
+    return cleaned
 
 def get_session():
     handshake_url = f"{PORTAL_URL}?type=stb&action=handshake&js=&token=&mac={MAC_ADDRESS}"
@@ -104,7 +117,6 @@ def get_channels_by_genre(token, cookie, genre_id):
     return all_channels
 
 def fetch_genre_m3u(genre, token, cookie, host_url):
-    """প্রতিটি ক্যাটাগরির ডাটা সমান্তরালভাবে প্রসেস করার সাব-ফাংশন"""
     genre_id = genre.get('id')
     genre_title = genre.get('title') or genre.get('name') or "General"
     
@@ -147,7 +159,6 @@ def playlist():
     global PLAYLIST_CACHE, CACHE_TIMESTAMP
     current_time = time.time()
 
-    # ক্যাশ ভ্যালিড থাকলে সরাসরি মেমোরি থেকে রিটার্ন করা হবে (০.০১ সেকেন্ডে লোড হবে)
     if PLAYLIST_CACHE and (current_time - CACHE_TIMESTAMP < CACHE_DURATION):
         return Response(PLAYLIST_CACHE, mimetype='text/plain')
 
@@ -161,7 +172,6 @@ def playlist():
 
     host_url = request.host_url.rstrip('/')
 
-    # ThreadPoolExecutor দিয়ে ১০টি ক্যাটাগরি একসাথে প্যারালালি প্রসেস করা হচ্ছে
     m3u_parts = []
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = [executor.submit(fetch_genre_m3u, genre, token, cookie, host_url) for genre in genres]
@@ -173,7 +183,6 @@ def playlist():
 
     m3u_content = "#EXTM3U\n" + "".join(m3u_parts)
 
-    # মেমোরি ক্যাশ আপডেট করা হচ্ছে
     PLAYLIST_CACHE = m3u_content
     CACHE_TIMESTAMP = current_time
 
@@ -191,11 +200,15 @@ def play():
 
     playable_url = get_playable_link(token, cookie, cmd)
 
-    if playable_url and playable_url.startswith('http'):
-        return redirect(playable_url, code=302)
-    else:
-        fallback_url = cmd.replace('ffrt ', '').replace('ffmpeg ', '').replace('auto ', '').strip().replace('\\', '/')
-        return redirect(fallback_url, code=302)
+    # সার্ভার থেকে পাওয়া লিঙ্কটি ক্লিন এবং .m3u8 এ রূপান্তর করা হচ্ছে
+    if playable_url:
+        final_url = clean_redirect_url(playable_url)
+        if final_url.startswith('http'):
+            return redirect(final_url, code=302)
+
+    # ব্যর্থ হলে ব্যাকআপ লিঙ্কটিকেও ক্লিন এবং রূপান্তর করা হবে
+    fallback_url = clean_redirect_url(cmd)
+    return redirect(fallback_url, code=302)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
