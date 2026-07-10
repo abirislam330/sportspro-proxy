@@ -26,9 +26,11 @@ PLAYLIST_CACHE = None
 CACHE_TIMESTAMP = 0
 CACHE_DURATION = 1800
 
-# সেশন এবং কুকি বারবার হ্যান্ডশেক এড়াতে গ্লোবাল ভ্যারিয়েবল
+# সেশন কুকি স্বয়ংক্রিয়ভাবে ম্যানেজ করার জন্য requests.Session ব্যবহার করা হচ্ছে
+session_client = requests.Session()
+session_client.headers.update(headers)
+
 ACTIVE_TOKEN = None
-ACTIVE_COOKIE = None
 
 def clean_redirect_url(url, force_m3u8=False):
     if not url:
@@ -41,39 +43,28 @@ def clean_redirect_url(url, force_m3u8=False):
     return cleaned
 
 def get_session():
-    global ACTIVE_TOKEN, ACTIVE_COOKIE
+    global ACTIVE_TOKEN
     handshake_url = f"{PORTAL_URL}?type=stb&action=handshake&js=&token=&mac={MAC_ADDRESS}"
     try:
-        response = requests.get(handshake_url, headers=headers, timeout=10)
+        # সেশন ক্লায়েন্ট দিয়ে রিকোয়েস্ট করা হচ্ছে, যা কুকি অটো-সেভ রাখবে
+        response = session_client.get(handshake_url, timeout=10)
         if response.status_code == 200:
             data = response.json()
             token = data.get('js', {}).get('token', '')
-            
-            set_cookie = response.headers.get('Set-Cookie', '')
-            cookie_val = ""
-            if set_cookie:
-                match = re.search(r'([a-zA-Z0-9_-]+=[a-zA-Z0-9_-]+)', set_cookie)
-                if match:
-                    cookie_val = match.group(1)
-            
             ACTIVE_TOKEN = token
-            ACTIVE_COOKIE = cookie_val
-            return token, cookie_val
+            # সেশন ক্লায়েন্টে অথরাইজেশন হেডার আপডেট করা হচ্ছে
+            session_client.headers.update({'Authorization': f'Bearer {token}'})
+            return token
     except Exception:
         pass
-    return None, None
+    return None
 
-def get_playable_link(token, cookie, cmd_url):
+def get_playable_link(token, cmd_url):
     encoded_cmd = urllib.parse.quote(cmd_url, safe='')
     url = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd}&token={token}&series=&forced_tmp_link=1"
-    
-    session_headers = headers.copy()
-    session_headers['Authorization'] = f'Bearer {token}'
-    if cookie:
-        session_headers['Cookie'] = f"mac={MAC_ADDRESS}; {cookie}"
-        
     try:
-        response = requests.get(url, headers=session_headers, timeout=10)
+        # সেশন ক্লায়েন্ট স্বয়ংক্রিয়ভাবে সঠিক কুকি সহ রিকোয়েস্ট পাঠাবে
+        response = session_client.get(url, timeout=10)
         if response.status_code == 200:
             res_data = response.json()
             js_val = res_data.get('js', '')
@@ -84,32 +75,23 @@ def get_playable_link(token, cookie, cmd_url):
         pass
     return None
 
-def get_genres(token, cookie):
+def get_genres(token):
     url = f"{PORTAL_URL}?type=itv&action=get_genres"
-    session_headers = headers.copy()
-    session_headers['Authorization'] = f'Bearer {token}'
-    if cookie:
-        session_headers['Cookie'] = f"mac={MAC_ADDRESS}; {cookie}"
     try:
-        response = requests.get(url, headers=session_headers, timeout=10)
+        response = session_client.get(url, timeout=10)
         if response.status_code == 200:
             return response.json().get('js', [])
     except Exception:
         pass
     return []
 
-def get_channels_by_genre(token, cookie, genre_id):
+def get_channels_by_genre(token, genre_id):
     all_channels = []
     page = 1
     while True:
         url = f"{PORTAL_URL}?type=itv&action=get_ordered_list&genre={genre_id}&force_ch_link_check=&fav=0&sortby=number&hd=0&p={page}"
-        session_headers = headers.copy()
-        session_headers['Authorization'] = f'Bearer {token}'
-        if cookie:
-            session_headers['Cookie'] = f"mac={MAC_ADDRESS}; {cookie}"
-            
         try:
-            response = requests.get(url, headers=session_headers, timeout=10)
+            response = session_client.get(url, timeout=10)
             if response.status_code != 200:
                 break
             js_data = response.json().get('js', {})
@@ -131,14 +113,14 @@ def get_channels_by_genre(token, cookie, genre_id):
             break
     return all_channels
 
-def fetch_genre_m3u(genre, token, cookie, host_url):
+def fetch_genre_m3u(genre, token, host_url):
     genre_id = genre.get('id')
     genre_title = genre.get('title') or genre.get('name') or "General"
     
     if not genre_id or genre_title.strip().lower() in ['all', 'all channels', 'all tv']:
         return ""
 
-    channels = get_channels_by_genre(token, cookie, genre_id)
+    channels = get_channels_by_genre(token, genre_id)
     m3u_part = ""
     for ch in channels:
         name = ch.get('name', 'Unknown')
@@ -167,8 +149,8 @@ def home():
     <html>
         <head><title>IPTV Proxy Server</title></head>
         <body style="font-family: Arial, sans-serif; padding: 20px;">
-            <h2>IPTV MAC-to-M3U8 Proxy Server (Formula-Based)</h2>
-            <p>আপনার রিয়েল-টাইম টাইমার সমর্থিত প্রক্সি সার্ভারটি সফলভাবে চালু হয়েছে।</p>
+            <h2>IPTV MAC-to-M3U8 Proxy Server (Session-Based)</h2>
+            <p>আপনার সেশন ও কুকি সমর্থিত প্রক্সি সার্ভারটি সফলভাবে চালু হয়েছে।</p>
             <h3>আপনার প্লেলিস্ট লিঙ্ক (M3U):</h3>
             <code style="background: #f4f4f4; padding: 10px; display: block; word-break: break-all;">
                 {host}/playlist.m3u
@@ -186,11 +168,11 @@ def playlist():
     if PLAYLIST_CACHE and (current_time - CACHE_TIMESTAMP < CACHE_DURATION):
         return Response(PLAYLIST_CACHE, mimetype='text/plain')
 
-    token, cookie = get_session()
+    token = get_session()
     if not token:
         return "Authentication with portal failed.", 500
 
-    genres = get_genres(token, cookie)
+    genres = get_genres(token)
     if not genres:
         return "Could not fetch genres.", 500
 
@@ -198,7 +180,7 @@ def playlist():
 
     m3u_parts = []
     with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [executor.submit(fetch_genre_m3u, genre, token, cookie, host_url) for genre in genres]
+        futures = [executor.submit(fetch_genre_m3u, genre, token, host_url) for genre in genres]
         for future in futures:
             try:
                 m3u_parts.append(future.result())
@@ -214,7 +196,7 @@ def playlist():
 
 @app.route('/play')
 def play():
-    global ACTIVE_TOKEN, ACTIVE_COOKIE
+    global ACTIVE_TOKEN
     cmd = request.args.get('cmd')
     if not cmd:
         return "Missing cmd parameter.", 400
@@ -223,51 +205,48 @@ def play():
     if not channel_id:
         return "Invalid channel ID.", 400
 
-    token, cookie = ACTIVE_TOKEN, ACTIVE_COOKIE
+    token = ACTIVE_TOKEN
     if not token:
-        token, cookie = get_session()
+        token = get_session()
 
     if not token:
         return "Failed to authenticate session.", 500
 
-    playable_url = get_playable_link(token, cookie, cmd)
+    playable_url = get_playable_link(token, cmd)
 
     if playable_url:
         match = re.search(r'(SN_\d+)', playable_url)
         if match:
             sn_token = match.group(1)
+            # ফর্মুলা ভিত্তিক রিডাইরেকশন
             final_m3u8_url = f"http://tv.cloudcdn.me/live/{MAC_ADDRESS}/{sn_token}/{channel_id}.m3u8"
             return redirect(final_m3u8_url, code=302)
 
     fallback_url = clean_redirect_url(cmd)
     return redirect(fallback_url, code=302)
 
-# --- নতুন লাইভ ডায়াগনস্টিক অ্যান্ডপয়েন্ট ---
 @app.route('/debug')
 def debug():
     cmd = request.args.get('cmd')
     if not cmd:
         return "Please add cmd in URL. Example: /debug?cmd=auto...", 400
         
-    token, cookie = get_session()
+    token = get_session()
     if not token:
-        return jsonify({"error": "Handshake failed", "token": token, "cookie": cookie}), 500
+        return jsonify({"error": "Handshake failed", "token": token}), 500
         
     encoded_cmd = urllib.parse.quote(cmd, safe='')
     url = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd}&token={token}&series=&forced_tmp_link=1"
     
-    session_headers = headers.copy()
-    session_headers['Authorization'] = f'Bearer {token}'
-    if cookie:
-        session_headers['Cookie'] = f"mac={MAC_ADDRESS}; {cookie}"
-        
     try:
-        response = requests.get(url, headers=session_headers, timeout=10)
+        response = session_client.get(url, timeout=10)
+        # সেশন কুকি চেক করা
+        cookies_saved = session_client.cookies.get_dict()
         return jsonify({
             "portal_status_code": response.status_code,
             "portal_response_raw": response.text,
             "extracted_token": token,
-            "extracted_cookie": cookie,
+            "session_cookies_active": cookies_saved,
             "api_request_url": url
         })
     except Exception as e:
