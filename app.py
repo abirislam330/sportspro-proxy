@@ -36,7 +36,7 @@ def clean_redirect_url(url, force_m3u8=False):
     cleaned = cleaned.replace('\\', '/')
     # ৩. ডবল স্ল্যাশ নিশ্চিত করা
     cleaned = re.sub(r'^(https?:)/+', r'\1//', cleaned)
-    # ৪. শুধুমাত্র সেশন লিঙ্কের ক্ষেত্রে .ts কে .m3u8 এ রূপান্তর করা (প্যারামিটার অক্ষত রেখে)
+    # ৪. সেশন লিঙ্কের ক্ষেত্রে .ts কে .m3u8 এ রূপান্তর করা (প্যারামিটার অক্ষত রেখে)
     if force_m3u8:
         cleaned = re.sub(r'\.ts(?=\b|\?|$)', '.m3u8', cleaned, flags=re.IGNORECASE)
     return cleaned
@@ -55,7 +55,10 @@ def get_session():
     return None, None
 
 def get_playable_link(token, cookie, cmd_url):
-    url = f"{PORTAL_URL}?type=itv&action=create_link&cmd={urllib.parse.quote(cmd_url)}&series=&forced_tmp_link=1"
+    # safe='' দিয়ে সব স্ল্যাশকে (%) এনকোড করা নিশ্চিত করা হচ্ছে
+    encoded_cmd = urllib.parse.quote(cmd_url, safe='')
+    url = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd}&series=&forced_tmp_link=1"
+    
     session_headers = headers.copy()
     session_headers['Authorization'] = f'Bearer {token}'
     if cookie:
@@ -65,7 +68,11 @@ def get_playable_link(token, cookie, cmd_url):
         response = requests.get(url, headers=session_headers, timeout=10)
         if response.status_code == 200:
             res_data = response.json()
-            return res_data.get('js', '')
+            js_val = res_data.get('js', '')
+            # সার্ভার অবজেক্ট বা টেক্সট যে ফরম্যাটেই ডাটা পাঠাক, তা রিড করার লজিক
+            if isinstance(js_val, dict):
+                return js_val.get('cmd', '') or js_val.get('url', '') or ''
+            return str(js_val)
     except Exception:
         pass
     return None
@@ -132,7 +139,7 @@ def fetch_genre_m3u(genre, token, cookie, host_url):
         logo = ch.get('logo', '')
         
         if cmd:
-            encoded_cmd = urllib.parse.quote(cmd)
+            encoded_cmd = urllib.parse.quote(cmd, safe='')
             proxy_play_url = f"{host_url}/play?cmd={encoded_cmd}"
             m3u_part += f'#EXTINF:-1 tvg-logo="{logo}" group-title="{genre_title}",{name}\n{proxy_play_url}\n'
     return m3u_part
