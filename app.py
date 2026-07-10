@@ -25,11 +25,8 @@ PLAYLIST_CACHE = None
 CACHE_TIMESTAMP = 0
 CACHE_DURATION = 1800
 
-# সেশন ক্লায়েন্ট তৈরি করা
 session_client = requests.Session()
 session_client.headers.update(headers)
-# সেশন কুকি মেমোরিতে পার্মানেন্টলি ম্যাক সেট করা
-session_client.cookies.set('mac', MAC_ADDRESS, domain='tv.cloudcdn.me')
 
 ACTIVE_TOKEN = None
 GLOBAL_SN_TOKEN = None  # মেমোরিতে সেভ থাকা সেশন টোকেন (SN_xxxx)
@@ -51,9 +48,12 @@ def get_session():
             data = response.json()
             token = data.get('js', {}).get('token', '')
             ACTIVE_TOKEN = token
-            session_client.headers.update({'Authorization': f'Bearer {token}'})
             
-            # সেশন সম্পূর্ণ সচল করতে প্রোফাইল ভিউ সম্পূর্ণ করা হচ্ছে
+            # পিএইচপি সেশন ও কুকি অথরাইজেশন হেডার ইনজেকশন (১০০০% সলিড সলিউশন)
+            session_client.headers['Cookie'] = f"mac={MAC_ADDRESS}; PHPSESSID={token}; token={token}"
+            session_client.headers['Authorization'] = f'Bearer {token}'
+            
+            # সেশন সম্পূর্ণ ভেরিফাই করতে প্রোফাইল লোড করা হচ্ছে
             profile_url = f"{PORTAL_URL}?type=stb&action=get_profile"
             session_client.get(profile_url, timeout=10)
             
@@ -247,12 +247,12 @@ def play():
     if not channel_id:
         return "Invalid channel ID.", 400
 
-    # যদি মেমোরিতে সেশন টোকেন থাকে, তবে কোনো এপিআই রিকোয়েস্ট ছাড়াই সরাসরি ১ মিলি-সেকেন্ডে রিডাইরেক্ট হবে
+    # মেমোরিতে সেশন টোকেন থাকলে সরাসরি রিডাইরেক্ট হবে
     if GLOBAL_SN_TOKEN:
         final_m3u8_url = f"http://tv.cloudcdn.me/live/{MAC_ADDRESS}/{GLOBAL_SN_TOKEN}/{channel_id}.m3u8"
         return redirect(final_m3u8_url, code=302)
 
-    # যদি টোকেন না থাকে, তবে একবার সেশন রিস্টার্ট করে টোকেন সংগ্রহের ট্রাই করবে
+    # টোকেন না থাকলে সেশন রিস্টার্ট করে টোকেন সংগ্রহের ট্রাই করবে
     token = get_session()
     if token:
         playable_url = get_playable_link(token, cmd)
@@ -283,12 +283,11 @@ def debug():
     
     try:
         response = session_client.get(url, timeout=10)
-        cookies_saved = session_client.cookies.get_dict()
         return jsonify({
             "portal_status_code": response.status_code,
             "portal_response_raw": response.text,
             "extracted_token": token,
-            "session_cookies_active": cookies_saved,
+            "headers_sent": dict(session_client.headers),
             "api_request_url": url
         })
     except Exception as e:
