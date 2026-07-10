@@ -26,19 +26,13 @@ PLAYLIST_CACHE = None
 CACHE_TIMESTAMP = 0
 CACHE_DURATION = 1800  # ৩০ মিনিট ক্যাশ থাকবে
 
-def clean_redirect_url(url, force_m3u8=False):
-    """লিঙ্ক থেকে ffrt/auto প্রিফিক্স মুছে ফেলা এবং প্রয়োজনে .ts কে .m3u8 এ রূপান্তর করা"""
+def clean_redirect_url(url):
+    """সাধারণ ক্লিনিং (ব্যাকআপের জন্য)"""
     if not url:
         return ""
-    # ১. ffrt, auto, ffmpeg প্রিফিক্স মুছে ফেলা
     cleaned = re.sub(r'^(auto|ffrt|ffmpeg|rtmp|mp4)\s+', '', url, flags=re.IGNORECASE).strip()
-    # ২. ব্যাকস্ল্যাশ ঠিক করা
     cleaned = cleaned.replace('\\', '/')
-    # ৩. ডবল স্ল্যাশ নিশ্চিত করা
     cleaned = re.sub(r'^(https?:)/+', r'\1//', cleaned)
-    # ৪. সেশন লিঙ্কের ক্ষেত্রে .ts কে .m3u8 এ রূপান্তর করা (প্যারামিটার অক্ষত রেখে)
-    if force_m3u8:
-        cleaned = re.sub(r'\.ts(?=\b|\?|$)', '.m3u8', cleaned, flags=re.IGNORECASE)
     return cleaned
 
 def get_session():
@@ -48,16 +42,25 @@ def get_session():
         if response.status_code == 200:
             data = response.json()
             token = data.get('js', {}).get('token', '')
-            cookie = response.headers.get('Set-Cookie', '')
-            return token, cookie
+            
+            # সেট-কুকি থেকে শুধুমাত্র সেশন আইডি (PHPSESSID=xxxx) অংশটি ফিল্টার করা
+            set_cookie = response.headers.get('Set-Cookie', '')
+            cookie_val = ""
+            if set_cookie:
+                match = re.search(r'([a-zA-Z0-9_-]+=[a-zA-Z0-9_-]+)', set_cookie)
+                if match:
+                    cookie_val = match.group(1)
+            
+            return token, cookie_val
     except Exception:
         pass
     return None, None
 
 def get_playable_link(token, cookie, cmd_url):
-    # safe='' দিয়ে সব স্ল্যাশকে (%) এনকোড করা নিশ্চিত করা হচ্ছে
+    # safe='' দিয়ে সব স্ল্যাশ ও ক্যারেক্টারকে প্রপারলি এনকোড করা হচ্ছে
     encoded_cmd = urllib.parse.quote(cmd_url, safe='')
-    url = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd}&series=&forced_tmp_link=1"
+    # টোকেন ইউআরএল প্যারামিটার হিসেবেও পাঠানো হচ্ছে
+    url = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd}&token={token}&series=&forced_tmp_link=1"
     
     session_headers = headers.copy()
     session_headers['Authorization'] = f'Bearer {token}'
@@ -69,7 +72,6 @@ def get_playable_link(token, cookie, cmd_url):
         if response.status_code == 200:
             res_data = response.json()
             js_val = res_data.get('js', '')
-            # সার্ভার অবজেক্ট বা টেক্সট যে ফরম্যাটেই ডাটা পাঠাক, তা রিড করার লজিক
             if isinstance(js_val, dict):
                 return js_val.get('cmd', '') or js_val.get('url', '') or ''
             return str(js_val)
@@ -144,6 +146,16 @@ def fetch_genre_m3u(genre, token, cookie, host_url):
             m3u_part += f'#EXTINF:-1 tvg-logo="{logo}" group-title="{genre_title}",{name}\n{proxy_play_url}\n'
     return m3u_part
 
+def extract_channel_id(cmd):
+    """কমান্ড ইউআরএল থেকে চ্যানেল আইডি এক্সট্র্যাক্ট করা"""
+    match = re.search(r'channelId=(\d+)', cmd)
+    if match:
+        return match.group(1)
+    match2 = re.search(r'/(\d+)(\.ts|\.m3u8|$)', cmd)
+    if match2:
+        return match2.group(1)
+    return None
+
 @app.route('/')
 def home():
     host = request.host_url.rstrip('/')
@@ -151,8 +163,8 @@ def home():
     <html>
         <head><title>IPTV Proxy Server</title></head>
         <body style="font-family: Arial, sans-serif; padding: 20px;">
-            <h2>IPTV MAC-to-M3U8 Proxy Server (Optimized)</h2>
-            <p>আপনার স্পিড-অপ্টিমাইজড সার্ভারটি সফলভাবে চালু হয়েছে।</p>
+            <h2>IPTV MAC-to-M3U8 Proxy Server (Formula-Based)</h2>
+            <p>আপনার রিয়েল-টাইম টাইমার সমর্থিত প্রক্সি সার্ভারটি সফলভাবে চালু হয়েছে।</p>
             <h3>আপনার প্লেলিস্ট লিঙ্ক (M3U):</h3>
             <code style="background: #f4f4f4; padding: 10px; display: block; word-break: break-all;">
                 {host}/playlist.m3u
@@ -202,20 +214,27 @@ def play():
     if not cmd:
         return "Missing cmd parameter.", 400
 
+    channel_id = extract_channel_id(cmd)
+    if not channel_id:
+        return "Invalid channel ID.", 400
+
     token, cookie = get_session()
     if not token:
         return "Failed to authenticate session.", 500
 
     playable_url = get_playable_link(token, cookie, cmd)
 
-    # ১. পোর্টাল থেকে পাওয়া সেশন লিঙ্কটিকে ক্লিন এবং .m3u8 এ রূপান্তর করা হচ্ছে
+    # যদি সেশন লিঙ্ক পাওয়া যায়, তবে সেখান থেকে SN_xxxx টোকেন নিয়ে সরাসরি ফর্মুলা ভিত্তিক .m3u8 লিঙ্ক তৈরি করা হবে
     if playable_url:
-        final_url = clean_redirect_url(playable_url, force_m3u8=True)
-        if final_url.startswith('http'):
-            return redirect(final_url, code=302)
+        match = re.search(r'(SN_\d+)', playable_url)
+        if match:
+            sn_token = match.group(1)
+            # আপনার সেই শতভাগ সফল .m3u8 ফর্মুলা লিঙ্ক জেনারেশন
+            final_m3u8_url = f"http://tv.cloudcdn.me/live/{MAC_ADDRESS}/{sn_token}/{channel_id}.m3u8"
+            return redirect(final_m3u8_url, code=302)
 
-    # ২. কোনো কারণে সেশন লিঙ্ক ব্যর্থ হলে ব্যাকআপ লিঙ্কটিকে .ts রেখেই প্লে করা হবে
-    fallback_url = clean_redirect_url(cmd, force_m3u8=False)
+    # ব্যর্থ হলে ব্যাকআপ হিসেবে মূল লিঙ্কটি (.ts হিসেবেই) ওপেন হবে
+    fallback_url = clean_redirect_url(cmd)
     return redirect(fallback_url, code=302)
 
 if __name__ == '__main__':
