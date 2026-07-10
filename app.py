@@ -26,8 +26,8 @@ PLAYLIST_CACHE = None
 CACHE_TIMESTAMP = 0
 CACHE_DURATION = 1800  # ৩০ মিনিট ক্যাশ থাকবে
 
-def clean_redirect_url(url):
-    """লিঙ্ক থেকে ffrt/auto প্রিফিক্স মুছে ফেলা এবং .ts কে .m3u8 এ রূপান্তর করা"""
+def clean_redirect_url(url, force_m3u8=False):
+    """লিঙ্ক থেকে ffrt/auto প্রিফিক্স মুছে ফেলা এবং প্রয়োজনে .ts কে .m3u8 এ রূপান্তর করা"""
     if not url:
         return ""
     # ১. ffrt, auto, ffmpeg প্রিফিক্স মুছে ফেলা
@@ -36,8 +36,9 @@ def clean_redirect_url(url):
     cleaned = cleaned.replace('\\', '/')
     # ৩. ডবল স্ল্যাশ নিশ্চিত করা
     cleaned = re.sub(r'^(https?:)/+', r'\1//', cleaned)
-    # ৪. জোরপূর্বক .ts এক্সটেনশনকে .m3u8 এ রূপান্তর করা
-    cleaned = re.sub(r'\.ts(\b|\?|$)', '.m3u8', cleaned, flags=re.IGNORECASE)
+    # ৪. শুধুমাত্র সেশন লিঙ্কের ক্ষেত্রে .ts কে .m3u8 এ রূপান্তর করা (প্যারামিটার অক্ষত রেখে)
+    if force_m3u8:
+        cleaned = re.sub(r'\.ts(?=\b|\?|$)', '.m3u8', cleaned, flags=re.IGNORECASE)
     return cleaned
 
 def get_session():
@@ -200,14 +201,14 @@ def play():
 
     playable_url = get_playable_link(token, cookie, cmd)
 
-    # সার্ভার থেকে পাওয়া লিঙ্কটি ক্লিন এবং .m3u8 এ রূপান্তর করা হচ্ছে
+    # ১. পোর্টাল থেকে পাওয়া সেশন লিঙ্কটিকে ক্লিন এবং .m3u8 এ রূপান্তর করা হচ্ছে
     if playable_url:
-        final_url = clean_redirect_url(playable_url)
+        final_url = clean_redirect_url(playable_url, force_m3u8=True)
         if final_url.startswith('http'):
             return redirect(final_url, code=302)
 
-    # ব্যর্থ হলে ব্যাকআপ লিঙ্কটিকেও ক্লিন এবং রূপান্তর করা হবে
-    fallback_url = clean_redirect_url(cmd)
+    # ২. কোনো কারণে সেশন লিঙ্ক ব্যর্থ হলে ব্যাকআপ লিঙ্কটিকে .ts রেখেই প্লে করা হবে
+    fallback_url = clean_redirect_url(cmd, force_m3u8=False)
     return redirect(fallback_url, code=302)
 
 if __name__ == '__main__':
