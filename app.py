@@ -28,19 +28,18 @@ CACHE_DURATION = 1800
 # সেশন ক্লায়েন্ট তৈরি করা
 session_client = requests.Session()
 session_client.headers.update(headers)
-# সেশন মেমোরিতে সরাসরি ম্যাক কুকি ইনজেক্ট করা হচ্ছে (যাতে কখনও বাদ না পড়ে)
+# সেশন কুকি মেমোরিতে পার্মানেন্টলি ম্যাক সেট করা
 session_client.cookies.set('mac', MAC_ADDRESS, domain='tv.cloudcdn.me')
 
 ACTIVE_TOKEN = None
+GLOBAL_SN_TOKEN = None  # মেমোরিতে সেভ থাকা সেশন টোকেন (SN_xxxx)
 
-def clean_redirect_url(url, force_m3u8=False):
+def clean_redirect_url(url):
     if not url:
         return ""
     cleaned = re.sub(r'^(auto|ffrt|ffmpeg|rtmp|mp4)\s+', '', url, flags=re.IGNORECASE).strip()
     cleaned = cleaned.replace('\\', '/')
     cleaned = re.sub(r'^(https?:)/+', r'\1//', cleaned)
-    if force_m3u8:
-        cleaned = re.sub(r'\.ts(?=\b|\?|$)', '.m3u8', cleaned, flags=re.IGNORECASE)
     return cleaned
 
 def get_session():
@@ -53,40 +52,45 @@ def get_session():
             token = data.get('js', {}).get('token', '')
             ACTIVE_TOKEN = token
             session_client.headers.update({'Authorization': f'Bearer {token}'})
+            
+            # সেশন সম্পূর্ণ সচল করতে প্রোফাইল ভিউ সম্পূর্ণ করা হচ্ছে
+            profile_url = f"{PORTAL_URL}?type=stb&action=get_profile"
+            session_client.get(profile_url, timeout=10)
+            
             return token
     except Exception:
         pass
     return None
 
 def get_playable_link(token, cmd_url):
-    # ট্রাই ১: ক্লিন কমান্ড (ডাটাবেজ ম্যাচিংয়ের জন্য uid এবং deviceMac কেটে ফেলা)
+    # ডাটাবেজ ম্যাচিংয়ের জন্য uid এবং deviceMac কেটে ক্লিন করা হচ্ছে
     clean_cmd = re.sub(r'&uid=\d+', '', cmd_url)
     clean_cmd = re.sub(r'&deviceMac=[a-zA-Z0-9:]+', '', clean_cmd)
     
     encoded_cmd = urllib.parse.quote(clean_cmd, safe='')
-    url = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd}&token={token}&series=&forced_tmp_link=1"
+    
+    # টাইপ ১: স্ট্যান্ডার্ড (itv)
+    url_itv = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd}&token={token}&series=&forced_tmp_link=1"
     try:
-        response = session_client.get(url, timeout=10)
+        response = session_client.get(url_itv, timeout=10)
         if response.status_code == 200:
             res_data = response.json()
             js_val = res_data.get('js', '')
-            if js_val:
+            if js_val and "not authorized" not in str(js_val).lower():
                 if isinstance(js_val, dict):
                     return js_val.get('cmd', '') or js_val.get('url', '') or ''
-                if "not authorized" not in str(js_val).lower():
-                    return str(js_val)
+                return str(js_val)
     except Exception:
         pass
         
-    # ট্রাই ২: ব্যর্থ হলে অরিজিনাল কমান্ড দিয়ে ব্যাকআপ ট্রাই করা
-    encoded_cmd_orig = urllib.parse.quote(cmd_url, safe='')
-    url_orig = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd_orig}&token={token}&series=&forced_tmp_link=1"
+    # টাইপ ২: মিনিস্ট্রা স্ট্যান্ডার্ড (stb)
+    url_stb = f"{PORTAL_URL}?type=stb&action=create_link&cmd={encoded_cmd}&token={token}&series=&forced_tmp_link=1"
     try:
-        response = session_client.get(url_orig, timeout=10)
+        response = session_client.get(url_stb, timeout=10)
         if response.status_code == 200:
             res_data = response.json()
             js_val = res_data.get('js', '')
-            if js_val:
+            if js_val and "not authorized" not in str(js_val).lower():
                 if isinstance(js_val, dict):
                     return js_val.get('cmd', '') or js_val.get('url', '') or ''
                 return str(js_val)
@@ -182,7 +186,7 @@ def home():
 
 @app.route('/playlist.m3u')
 def playlist():
-    global PLAYLIST_CACHE, CACHE_TIMESTAMP
+    global PLAYLIST_CACHE, CACHE_TIMESTAMP, GLOBAL_SN_TOKEN
     current_time = time.time()
 
     if PLAYLIST_CACHE and (current_time - CACHE_TIMESTAMP < CACHE_DURATION):
@@ -197,6 +201,24 @@ def playlist():
         return "Could not fetch genres.", 500
 
     host_url = request.host_url.rstrip('/')
+
+    # ক্যাশ তৈরির সময়েই প্রথম ক্যাটাগরির প্রথম চ্যানেলের লিঙ্ক দিয়ে অ্যাক্টিভ SN_xxxx টোকেনটি তুলে নেওয়া হচ্ছে
+    print("Pre-fetching active session token...")
+    for genre in genres:
+        genre_id = genre.get('id')
+        if genre_id:
+            sample_channels = get_channels_by_genre(token, genre_id)
+            if sample_channels and len(sample_channels) > 0:
+                sample_cmd = sample_channels[0].get('cmd', '')
+                if sample_cmd:
+                    playable = get_playable_link(token, sample_cmd)
+                    if playable:
+                        match = re.search(r'(SN_\d+)', playable)
+                        if match:
+                            GLOBAL_SN_TOKEN = match.group(1)
+                            print(f"Global SN Token Cached: {GLOBAL_SN_TOKEN}")
+                            break
+            time.sleep(0.3)
 
     m3u_parts = []
     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -216,7 +238,7 @@ def playlist():
 
 @app.route('/play')
 def play():
-    global ACTIVE_TOKEN
+    global GLOBAL_SN_TOKEN
     cmd = request.args.get('cmd')
     if not cmd:
         return "Missing cmd parameter.", 400
@@ -225,21 +247,21 @@ def play():
     if not channel_id:
         return "Invalid channel ID.", 400
 
-    token = ACTIVE_TOKEN
-    if not token:
-        token = get_session()
+    # যদি মেমোরিতে সেশন টোকেন থাকে, তবে কোনো এপিআই রিকোয়েস্ট ছাড়াই সরাসরি ১ মিলি-সেকেন্ডে রিডাইরেক্ট হবে
+    if GLOBAL_SN_TOKEN:
+        final_m3u8_url = f"http://tv.cloudcdn.me/live/{MAC_ADDRESS}/{GLOBAL_SN_TOKEN}/{channel_id}.m3u8"
+        return redirect(final_m3u8_url, code=302)
 
-    if not token:
-        return "Failed to authenticate session.", 500
-
-    playable_url = get_playable_link(token, cmd)
-
-    if playable_url:
-        match = re.search(r'(SN_\d+)', playable_url)
-        if match:
-            sn_token = match.group(1)
-            final_m3u8_url = f"http://tv.cloudcdn.me/live/{MAC_ADDRESS}/{sn_token}/{channel_id}.m3u8"
-            return redirect(final_m3u8_url, code=302)
+    # যদি টোকেন না থাকে, তবে একবার সেশন রিস্টার্ট করে টোকেন সংগ্রহের ট্রাই করবে
+    token = get_session()
+    if token:
+        playable_url = get_playable_link(token, cmd)
+        if playable_url:
+            match = re.search(r'(SN_\d+)', playable_url)
+            if match:
+                GLOBAL_SN_TOKEN = match.group(1)
+                final_m3u8_url = f"http://tv.cloudcdn.me/live/{MAC_ADDRESS}/{GLOBAL_SN_TOKEN}/{channel_id}.m3u8"
+                return redirect(final_m3u8_url, code=302)
 
     fallback_url = clean_redirect_url(cmd)
     return redirect(fallback_url, code=302)
