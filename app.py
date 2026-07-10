@@ -17,7 +17,6 @@ USER_AGENT = 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, li
 
 headers = {
     'User-Agent': USER_AGENT,
-    'Cookie': f'mac={MAC_ADDRESS}',
     'Referer': PORTAL_URL.rsplit('/', 1)[0] if '/' in PORTAL_URL else PORTAL_URL,
     'X-User-MAC': MAC_ADDRESS
 }
@@ -26,9 +25,11 @@ PLAYLIST_CACHE = None
 CACHE_TIMESTAMP = 0
 CACHE_DURATION = 1800
 
-# সেশন কুকি স্বয়ংক্রিয়ভাবে ম্যানেজ করার জন্য requests.Session ব্যবহার করা হচ্ছে
+# সেশন ক্লায়েন্ট তৈরি করা
 session_client = requests.Session()
 session_client.headers.update(headers)
+# সেশন মেমোরিতে সরাসরি ম্যাক কুকি ইনজেক্ট করা হচ্ছে (যাতে কখনও বাদ না পড়ে)
+session_client.cookies.set('mac', MAC_ADDRESS, domain='tv.cloudcdn.me')
 
 ACTIVE_TOKEN = None
 
@@ -46,13 +47,11 @@ def get_session():
     global ACTIVE_TOKEN
     handshake_url = f"{PORTAL_URL}?type=stb&action=handshake&js=&token=&mac={MAC_ADDRESS}"
     try:
-        # সেশন ক্লায়েন্ট দিয়ে রিকোয়েস্ট করা হচ্ছে, যা কুকি অটো-সেভ রাখবে
         response = session_client.get(handshake_url, timeout=10)
         if response.status_code == 200:
             data = response.json()
             token = data.get('js', {}).get('token', '')
             ACTIVE_TOKEN = token
-            # সেশন ক্লায়েন্টে অথরাইজেশন হেডার আপডেট করা হচ্ছে
             session_client.headers.update({'Authorization': f'Bearer {token}'})
             return token
     except Exception:
@@ -60,19 +59,40 @@ def get_session():
     return None
 
 def get_playable_link(token, cmd_url):
-    encoded_cmd = urllib.parse.quote(cmd_url, safe='')
+    # ট্রাই ১: ক্লিন কমান্ড (ডাটাবেজ ম্যাচিংয়ের জন্য uid এবং deviceMac কেটে ফেলা)
+    clean_cmd = re.sub(r'&uid=\d+', '', cmd_url)
+    clean_cmd = re.sub(r'&deviceMac=[a-zA-Z0-9:]+', '', clean_cmd)
+    
+    encoded_cmd = urllib.parse.quote(clean_cmd, safe='')
     url = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd}&token={token}&series=&forced_tmp_link=1"
     try:
-        # সেশন ক্লায়েন্ট স্বয়ংক্রিয়ভাবে সঠিক কুকি সহ রিকোয়েস্ট পাঠাবে
         response = session_client.get(url, timeout=10)
         if response.status_code == 200:
             res_data = response.json()
             js_val = res_data.get('js', '')
-            if isinstance(js_val, dict):
-                return js_val.get('cmd', '') or js_val.get('url', '') or ''
-            return str(js_val)
+            if js_val:
+                if isinstance(js_val, dict):
+                    return js_val.get('cmd', '') or js_val.get('url', '') or ''
+                if "not authorized" not in str(js_val).lower():
+                    return str(js_val)
     except Exception:
         pass
+        
+    # ট্রাই ২: ব্যর্থ হলে অরিজিনাল কমান্ড দিয়ে ব্যাকআপ ট্রাই করা
+    encoded_cmd_orig = urllib.parse.quote(cmd_url, safe='')
+    url_orig = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd_orig}&token={token}&series=&forced_tmp_link=1"
+    try:
+        response = session_client.get(url_orig, timeout=10)
+        if response.status_code == 200:
+            res_data = response.json()
+            js_val = res_data.get('js', '')
+            if js_val:
+                if isinstance(js_val, dict):
+                    return js_val.get('cmd', '') or js_val.get('url', '') or ''
+                return str(js_val)
+    except Exception:
+        pass
+        
     return None
 
 def get_genres(token):
@@ -218,7 +238,6 @@ def play():
         match = re.search(r'(SN_\d+)', playable_url)
         if match:
             sn_token = match.group(1)
-            # ফর্মুলা ভিত্তিক রিডাইরেকশন
             final_m3u8_url = f"http://tv.cloudcdn.me/live/{MAC_ADDRESS}/{sn_token}/{channel_id}.m3u8"
             return redirect(final_m3u8_url, code=302)
 
@@ -235,12 +254,13 @@ def debug():
     if not token:
         return jsonify({"error": "Handshake failed", "token": token}), 500
         
-    encoded_cmd = urllib.parse.quote(cmd, safe='')
+    clean_cmd = re.sub(r'&uid=\d+', '', cmd)
+    clean_cmd = re.sub(r'&deviceMac=[a-zA-Z0-9:]+', '', clean_cmd)
+    encoded_cmd = urllib.parse.quote(clean_cmd, safe='')
     url = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd}&token={token}&series=&forced_tmp_link=1"
     
     try:
         response = session_client.get(url, timeout=10)
-        # সেশন কুকি চেক করা
         cookies_saved = session_client.cookies.get_dict()
         return jsonify({
             "portal_status_code": response.status_code,
