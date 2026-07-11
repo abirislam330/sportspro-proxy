@@ -27,9 +27,11 @@ CACHE_DURATION = 1800
 
 session_client = requests.Session()
 session_client.headers.update(headers)
+# সেশন কুকি মেমোরিতে পার্মানেন্টলি ম্যাক সেট করা
+session_client.cookies.set('mac', MAC_ADDRESS, domain='tv.cloudcdn.me')
 
 ACTIVE_TOKEN = None
-GLOBAL_SN_TOKEN = None  # মেমোরিতে সেভ থাকা সেশন টোকেন (SN_xxxx)
+GLOBAL_SN_TOKEN = None
 
 def clean_redirect_url(url):
     if not url:
@@ -49,11 +51,9 @@ def get_session():
             token = data.get('js', {}).get('token', '')
             ACTIVE_TOKEN = token
             
-            # পিএইচপি সেশন ও কুকি অথরাইজেশন হেডার ইনজেকশন (১০০০% সলিড সলিউশন)
             session_client.headers['Cookie'] = f"mac={MAC_ADDRESS}; PHPSESSID={token}; token={token}"
             session_client.headers['Authorization'] = f'Bearer {token}'
             
-            # সেশন সম্পূর্ণ ভেরিফাই করতে প্রোফাইল লোড করা হচ্ছে
             profile_url = f"{PORTAL_URL}?type=stb&action=get_profile"
             session_client.get(profile_url, timeout=10)
             
@@ -67,12 +67,17 @@ def get_playable_link(token, cmd_url):
     clean_cmd = re.sub(r'&uid=\d+', '', cmd_url)
     clean_cmd = re.sub(r'&deviceMac=[a-zA-Z0-9:]+', '', clean_cmd)
     
-    encoded_cmd = urllib.parse.quote(clean_cmd, safe='')
+    # POST মেথডে রিকোয়েস্ট পাঠানো হচ্ছে (WAF ফায়ারওয়াল বাইপাস করার জন্য)
+    url_itv = f"{PORTAL_URL}?type=itv&action=create_link"
+    post_data = {
+        "cmd": clean_cmd,
+        "token": token,
+        "series": "",
+        "forced_tmp_link": "1"
+    }
     
-    # টাইপ ১: স্ট্যান্ডার্ড (itv)
-    url_itv = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd}&token={token}&series=&forced_tmp_link=1"
     try:
-        response = session_client.get(url_itv, timeout=10)
+        response = session_client.post(url_itv, data=post_data, timeout=10)
         if response.status_code == 200:
             res_data = response.json()
             js_val = res_data.get('js', '')
@@ -83,10 +88,10 @@ def get_playable_link(token, cmd_url):
     except Exception:
         pass
         
-    # টাইপ ২: মিনিস্ট্রা স্ট্যান্ডার্ড (stb)
-    url_stb = f"{PORTAL_URL}?type=stb&action=create_link&cmd={encoded_cmd}&token={token}&series=&forced_tmp_link=1"
+    # টাইপ ২: stb (POST)
+    url_stb = f"{PORTAL_URL}?type=stb&action=create_link"
     try:
-        response = session_client.get(url_stb, timeout=10)
+        response = session_client.post(url_stb, data=post_data, timeout=10)
         if response.status_code == 200:
             res_data = response.json()
             js_val = res_data.get('js', '')
@@ -173,8 +178,8 @@ def home():
     <html>
         <head><title>IPTV Proxy Server</title></head>
         <body style="font-family: Arial, sans-serif; padding: 20px;">
-            <h2>IPTV MAC-to-M3U8 Proxy Server (Session-Based)</h2>
-            <p>আপনার সেশন ও কুকি সমর্থিত প্রক্সি সার্ভারটি সফলভাবে চালু হয়েছে।</p>
+            <h2>IPTV MAC-to-M3U8 Proxy Server (POST-Based)</h2>
+            <p>আপনার সেশন ও ফায়ারওয়াল বাইপাস সমর্থিত প্রক্সি সার্ভারটি সফলভাবে চালু হয়েছে।</p>
             <h3>আপনার প্লেলিস্ট লিঙ্ক (M3U):</h3>
             <code style="background: #f4f4f4; padding: 10px; display: block; word-break: break-all;">
                 {host}/playlist.m3u
@@ -202,8 +207,8 @@ def playlist():
 
     host_url = request.host_url.rstrip('/')
 
-    # ক্যাশ তৈরির সময়েই প্রথম ক্যাটাগরির প্রথম চ্যানেলের লিঙ্ক দিয়ে অ্যাক্টিভ SN_xxxx টোকেনটি তুলে নেওয়া হচ্ছে
-    print("Pre-fetching active session token...")
+    # প্রথম ক্যাটাগরির প্রথম চ্যানেলের লিঙ্ক দিয়ে অ্যাক্টিভ SN_xxxx টোকেনটি তুলে নেওয়া হচ্ছে
+    print("Pre-fetching active session token via POST...")
     for genre in genres:
         genre_id = genre.get('id')
         if genre_id:
@@ -278,17 +283,25 @@ def debug():
         
     clean_cmd = re.sub(r'&uid=\d+', '', cmd)
     clean_cmd = re.sub(r'&deviceMac=[a-zA-Z0-9:]+', '', clean_cmd)
-    encoded_cmd = urllib.parse.quote(clean_cmd, safe='')
-    url = f"{PORTAL_URL}?type=itv&action=create_link&cmd={encoded_cmd}&token={token}&series=&forced_tmp_link=1"
+    
+    url_post = f"{PORTAL_URL}?type=itv&action=create_link"
+    post_data = {
+        "cmd": clean_cmd,
+        "token": token,
+        "series": "",
+        "forced_tmp_link": "1"
+    }
     
     try:
-        response = session_client.get(url, timeout=10)
+        response = session_client.post(url_post, data=post_data, timeout=10)
+        cookies_saved = session_client.cookies.get_dict()
         return jsonify({
+            "method_used": "POST",
             "portal_status_code": response.status_code,
             "portal_response_raw": response.text,
             "extracted_token": token,
             "headers_sent": dict(session_client.headers),
-            "api_request_url": url
+            "post_data_sent": post_data
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
